@@ -1,0 +1,162 @@
+meters:
+  guest-ratelimit:
+    meter_id: 1
+    entry:
+      flags: ["KBPS", "BURST", "STATS"]
+      bands:
+        - type: DROP
+          rate: 10000        # 10 Mbit/s
+          burst_size: 1000   # 1000 kb burst toegestaan
+
+acls:
+  # Elk user-VLAN mag: ARP, eigen gateway, en alles behalve de andere
+  # user-VLANs. Wat overblijft (10.99.0.0/24 + internet) is toegestaan.
+  employee-isolation:
+    - rule: {dl_type: 0x0806, actions: {allow: true}}
+    - rule: {dl_type: 0x0800, nw_dst: "10.10.0.1", actions: {allow: true}}
+    - rule: {dl_type: 0x0800, nw_dst: "10.20.0.0/24", actions: {allow: false}}
+    - rule: {dl_type: 0x0800, nw_dst: "10.30.0.0/26", actions: {allow: false}}
+    - rule: {actions: {allow: true}}
+
+  guest-isolation:
+    - rule: {dl_type: 0x0806, actions: {allow: true}}
+    - rule: {dl_type: 0x0800, nw_dst: "10.20.0.1", actions: {allow: true}}
+    # Gasten ook onderling gescheiden (staat NA de allow voor de gateway)
+    - rule: {dl_type: 0x0800, nw_dst: "10.20.0.0/24", actions: {allow: false}}
+    - rule: {dl_type: 0x0800, nw_dst: "10.10.0.0/23", actions: {allow: false}}
+    - rule: {dl_type: 0x0800, nw_dst: "10.30.0.0/26", actions: {allow: false}}
+    - rule:
+        actions:
+          allow: true
+          meter: guest-ratelimit
+
+  management-isolation:
+    - rule: {dl_type: 0x0806, actions: {allow: true}}
+    - rule: {dl_type: 0x0800, nw_dst: "10.30.0.1", actions: {allow: true}}
+    - rule: {dl_type: 0x0800, nw_dst: "10.10.0.0/23", actions: {allow: false}}
+    - rule: {dl_type: 0x0800, nw_dst: "10.20.0.0/24", actions: {allow: false}}
+    - rule: {actions: {allow: true}}
+
+vlans:
+  employee:
+    vid: 10
+    description: "Employee netwerk"
+    #acls_in: [employee-isolation]
+    faucet_vips: ["10.10.0.1/23"]
+    faucet_mac: "0e:00:00:00:10:01"
+  guest:
+    vid: 20
+    description: "Gastennetwerk - onderling geisoleerd"
+    acls_in: [guest-isolation]
+    faucet_vips: ["10.20.0.1/24"]
+    faucet_mac: "0e:00:00:00:20:01"
+  management:
+    vid: 30
+    description: "Management netwerk"
+    #acls_in: [management-isolation]
+    faucet_vips: ["10.30.0.1/26"]
+    faucet_mac: "0e:00:00:00:30:01"
+  wan:
+    vid: 40
+    description: "Transit-VLAN naar NAT-node / ISP"
+    faucet_vips: ["10.99.0.1/24"]
+    faucet_mac: "0e:00:00:00:40:01"
+    routes:
+      - route:
+          ip_dst: "0.0.0.0/0"
+          ip_gw: "10.99.0.10"
+
+routers:
+  #campus-router:
+    #vlans: [employee, guest, management, wan]
+  router-employee-wan:   {vlans: [employee, wan]}   # wan
+  router-guest-wan:      {vlans: [guest, wan]}      # wan alweer
+  router-management-wan: {vlans: [management, wan]} # en nog eens
+
+dps:
+  # === Gebouw A ===
+  sA_core:
+    dp_id: 0x1
+    hardware: "Open vSwitch"
+    stack:
+      priority: 1          # root van de stack
+    interfaces:
+      1: {description: "stack naar sA1",     stack: {dp: sA1, port: 1}}
+      2: {description: "stack naar sA2",     stack: {dp: sA2, port: 1}}
+      3: {description: "darkfiber naar sB_core", stack: {dp: sB_core, port: 4}}
+      4: {description: "natNode - transit naar ISP", native_vlan: wan}
+
+  sA1:
+    dp_id: 0x2
+    hardware: "Open vSwitch"
+    interfaces:
+      1: {description: "stack naar sA_core", stack: {dp: sA_core, port: 1}}
+      2: {description: "hA1_emp", native_vlan: employee}
+      3: {description: "hA1_gst", native_vlan: guest}
+      4:
+        description: "hA1_mgt"
+        native_vlan: management
+        permanent_learn: true    # NFV: port security - bindt poort aan eerste MAC
+        max_hosts: 1
+
+  sA2:
+    dp_id: 0x3
+    hardware: "Open vSwitch"
+    interfaces:
+      1: {description: "stack naar sA_core", stack: {dp: sA_core, port: 2}}
+      2: {description: "hA2_emp", native_vlan: employee}
+      3: {description: "hA2_gst", native_vlan: guest}
+      4:
+        description: "hA2_mgt"
+        native_vlan: management
+        permanent_learn: true
+        max_hosts: 1
+
+  # === Gebouw B ===
+  sB_core:
+    dp_id: 0x4
+    hardware: "Open vSwitch"
+    interfaces:
+      1: {description: "stack naar sB1",     stack: {dp: sB1, port: 1}}
+      2: {description: "stack naar sB2",     stack: {dp: sB2, port: 1}}
+      3: {description: "stack naar sB3",     stack: {dp: sB3, port: 1}}
+      4: {description: "darkfiber naar sA_core", stack: {dp: sA_core, port: 3}}
+
+  sB1:
+    dp_id: 0x5
+    hardware: "Open vSwitch"
+    interfaces:
+      1: {description: "stack naar sB_core", stack: {dp: sB_core, port: 1}}
+      2: {description: "hB1_emp", native_vlan: employee}
+      3: {description: "hB1_gst", native_vlan: guest}
+      4:
+        description: "hB1_mgt"
+        native_vlan: management
+        permanent_learn: true
+        max_hosts: 1
+
+  sB2:
+    dp_id: 0x6
+    hardware: "Open vSwitch"
+    interfaces:
+      1: {description: "stack naar sB_core", stack: {dp: sB_core, port: 2}}
+      2: {description: "hB2_emp", native_vlan: employee}
+      3: {description: "hB2_gst", native_vlan: guest}
+      4:
+        description: "hB2_mgt"
+        native_vlan: management
+        permanent_learn: true
+        max_hosts: 1
+
+  sB3:
+    dp_id: 0x7
+    hardware: "Open vSwitch"
+    interfaces:
+      1: {description: "stack naar sB_core", stack: {dp: sB_core, port: 3}}
+      2: {description: "hB3_emp", native_vlan: employee}
+      3: {description: "hB3_gst", native_vlan: guest}
+      4:
+        description: "hB3_mgt"
+        native_vlan: management
+        permanent_learn: true
+        max_hosts: 1
