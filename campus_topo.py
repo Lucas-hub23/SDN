@@ -1,8 +1,12 @@
 """
-Campus SDN Topologie - Gebouw A & B
-Employee 10.10.0.0/23 | Guest 10.20.0.0/24 | Mgmt 10.30.0.0/26 | Transit 10.99.0.0/24
-Routing via Faucet (inter-VLAN), internet via NAT-node in root-namespace.
-Switch-onderlinge links zijn stack-links (zie faucet.yaml).
+Campus SDN Topologie - Gebouw A & B (fase 2: dual-stack)
+IPv4: Employee 10.10.0.0/23 | Guest 10.20.0.0/24 | Mgmt 10.30.0.0/26 | Transit 10.99.0.0/24
+IPv6: Employee 2001:db8:10::/64 | Guest 2001:db8:20::/64 | Mgmt 2001:db8:30::/64
+      Transit 2001:db8:99::/64  | "Internet" achter ISP-node: 2001:db8:ff::1
+
+IPv4 gaat via de NAT-node naar echt internet (MASQUERADE).
+IPv6 gaat via de ISP-node - VirtualBox' NAT-engine heeft geen IPv6-uplink,
+dus de ISP wordt gesimuleerd. Geen NAT nodig: IPv6 is end-to-end routeerbaar.
 """
 from functools import partial
 from mininet.topo import Topo
@@ -14,6 +18,24 @@ from mininet.cli import CLI
 from mininet.log import setLogLevel, info
 
 FAUCET_IP = "192.168.56.20"
+
+# Verdiepingen: (tag, host-nummer). Het nummer is het laatste octet in v4
+# en het laatste veld in v6, zodat adressen makkelijk te herleiden zijn.
+FLOORS = [('A1', 11), ('A2', 12), ('B1', 13), ('B2', 14), ('B3', 15)]
+
+# Per categorie: adresformaat en gateway, voor beide protocollen
+CATEGORIES = {
+    'emp': {'v4': '10.10.0.%d/23',  'v4gw': '10.10.0.1',
+            'v6': '2001:db8:10::%d/64', 'v6gw': '2001:db8:10::1'},
+    'gst': {'v4': '10.20.0.%d/24',  'v4gw': '10.20.0.1',
+            'v6': '2001:db8:20::%d/64', 'v6gw': '2001:db8:20::1'},
+    'mgt': {'v4': '10.30.0.%d/26',  'v4gw': '10.30.0.1',
+            'v6': '2001:db8:30::%d/64', 'v6gw': '2001:db8:30::1'},
+}
+
+# Interne subnetten - nodig voor de retourroutes op NAT- en ISP-node
+V4_SUBNETS = ('10.10.0.0/23', '10.20.0.0/24', '10.30.0.0/26')
+V6_SUBNETS = ('2001:db8:10::/64', '2001:db8:20::/64', '2001:db8:30::/64')
 
 
 class CampusTopo(Topo):
@@ -31,6 +53,11 @@ class CampusTopo(Topo):
         nat = self.addNode('natNode', cls=NAT, ip='10.99.0.10/24',
                            subnet='10.0.0.0/8', inNamespace=False)
 
+        # === ISP-node: simuleert de router van de provider (IPv6) ===
+        # Gewone host in eigen namespace; krijgt in run() een extra adres
+        # 2001:db8:ff::1 dat "een host op internet" voorstelt.
+        isp = self.addHost('ispNode', ip='10.99.0.20/24')
+
         # === Stack-links ===
         # Poortnummers EXPLICIET: Mininet nummert anders op volgorde van
         # aanmaken, en dan loopt de nummering uit de pas met faucet.yaml.
@@ -44,24 +71,18 @@ class CampusTopo(Topo):
         self.addLink(sA_core, sB_core, port1=3, port2=4,
                      cls=TCLink, bw=1000, delay='5ms')
 
-        # NAT-node op sA_core p4 (native_vlan wan)
-        self.addLink(nat, sA_core, port2=4)
+        # Transit-poorten op sA_core (beide native_vlan wan)
+        self.addLink(nat, sA_core, port2=4)    # NAT-node  -> IPv4 uplink
+        self.addLink(isp, sA_core, port2=5)    # ISP-node  -> IPv6 uplink
 
         # === Hosts: per verdieping employee / guest / management ===
-        floors = [
-            ('A1', sA1, 11), ('A2', sA2, 12),
-            ('B1', sB1, 13), ('B2', sB2, 14), ('B3', sB3, 15),
-        ]
-        for tag, sw, n in floors:
-            emp = self.addHost('h%s_emp' % tag, ip='10.10.0.%d/23' % n)
-            gst = self.addHost('h%s_gst' % tag, ip='10.20.0.%d/24' % n)
-            mgt = self.addHost('h%s_mgt' % tag, ip='10.30.0.%d/26' % n)
-            self.addLink(emp, sw, port2=2)
-            self.addLink(gst, sw, port2=3)
-            self.addLink(mgt, sw, port2=4)
-
-
-GATEWAYS = {'emp': '10.10.0.1', 'gst': '10.20.0.1', 'mgt': '10.30.0.1'}
+        switches = {'A1': sA1, 'A2': sA2, 'B1': sB1, 'B2': sB2, 'B3': sB3}
+        for tag, n in FLOORS:
+            sw = switches[tag]
+            for i, cat in enumerate(('emp', 'gst', 'mgt')):
+                host = self.addHost('h%s_%s' % (tag, cat),
+                                    ip=CATEGORIES[cat]['v4'] % n)
+                self.addLink(host, sw, port2=2 + i)   # emp=2, gst=3, mgt=4
 
 
 def run():
@@ -74,14 +95,19 @@ def run():
     )
     net.start()
 
-    info("\n*** Default gateways instellen per host...\n")
-    for host in net.hosts:
-        if host.name == 'natNode':
-            continue
-        gw = GATEWAYS[host.name.split('_')[1]]
-        host.cmd('ip route replace default via %s' % gw)
+    info("\n*** Hosts configureren (IPv4 gateway + IPv6 adres/gateway)...\n")
+    for tag, n in FLOORS:
+        for cat in ('emp', 'gst', 'mgt'):
+            host = net.get('h%s_%s' % (tag, cat))
+            iface = '%s-eth0' % host.name
+            cfg = CATEGORIES[cat]
+            # IPv4 default gateway (adres is al gezet via addHost)
+            host.cmd('ip route replace default via %s' % cfg['v4gw'])
+            # IPv6 adres + default gateway
+            host.cmd('ip -6 addr add %s dev %s' % (cfg['v6'] % n, iface))
+            host.cmd('ip -6 route replace default via %s' % cfg['v6gw'])
 
-    info("*** NAT-node configureren...\n")
+    info("*** NAT-node configureren (IPv4 uplink naar echt internet)...\n")
     nat = net.get('natNode')
     nat.cmd('sysctl -w net.ipv4.ip_forward=1')
 
@@ -97,10 +123,24 @@ def run():
     nat.cmd('iptables -P FORWARD ACCEPT')
 
     # Retourroutes naar de interne VLAN's via de Faucet-VIP op het transit-VLAN
-    for subnet in ('10.10.0.0/23', '10.20.0.0/24', '10.30.0.0/26'):
+    for subnet in V4_SUBNETS:
         nat.cmd('ip route replace %s via 10.99.0.1' % subnet)
 
-    info("*** Klaar. Geef de stack 30-60s om te convergeren voor je test.\n")
+    info("*** ISP-node configureren (IPv6 uplink, gesimuleerd)...\n")
+    isp = net.get('ispNode')
+    isp.cmd('sysctl -w net.ipv6.conf.all.forwarding=1')
+    isp.cmd('sysctl -w net.ipv4.ip_forward=1')
+    # Adres op het transit-VLAN
+    isp.cmd('ip -6 addr add 2001:db8:99::20/64 dev ispNode-eth0')
+    # "Een host op internet" - hier pingen de campus-hosts straks naartoe
+    isp.cmd('ip -6 addr add 2001:db8:ff::1/128 dev lo')
+    # Retourroutes naar de interne VLAN's via de Faucet-VIP
+    for subnet in V6_SUBNETS:
+        isp.cmd('ip -6 route replace %s via 2001:db8:99::1' % subnet)
+
+    info("\n*** Klaar. Geef de stack 30-60s om te convergeren.\n")
+    info("*** IPv4 test:  hA1_emp ping -c2 8.8.8.8\n")
+    info("*** IPv6 test:  hA1_emp ping6 -c2 2001:db8:ff::1\n")
     CLI(net)
     net.stop()
 
