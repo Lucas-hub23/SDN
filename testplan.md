@@ -349,53 +349,39 @@ sudo ovs-ofctl -O OpenFlow13 dump-flows sA1 | grep 'table=4' | grep 10.99.0
 
 ## Blok 5 — IPv6
 
-### 5.1 Per gebouw naar de eigen gesimuleerde ISP
-
+## 5.1 IPv6 naar de gesimuleerde ISP
 ```
-hA1_emp ping6 -c3 2001:db8:a:ff::1
-```
-```
-hB1_emp ping6 -c3 2001:db8:b:ff::1
+hA1_emp ping6 -c3 2001:db8:ff::1
+hB1_emp ping6 -c3 2001:db8:ff::1
 ```
 
-**Verwacht:** beide slagen. Eerste pakket mag wegvallen (Neighbor Discovery).
+Beide moeten slagen. Eerste pakket mag wegvallen door Neighbor Discovery.
 
-### 5.2 Alle categorieën
-
+## 5.2 Alle categorieën
 ```
-hA1_gst ping6 -c3 2001:db8:a:ff::1
+hA1_gst ping6 -c3 2001:db8:ff::1
+hA1_mgt ping6 -c3 2001:db8:ff::1
 ```
+## 5.3 Geen NAT bij IPv6
 ```
-hA1_mgt ping6 -c3 2001:db8:a:ff::1
+sudo tcpdump -ni ispNode-eth0 icmp6
+hA1_emp ping6 -c2 2001:db8:ff::1
 ```
+Let op het bronadres: 2001:db8:10::11 blijft ongewijzigd. Vergelijk met je tcpdump op eth0, waar 10.10.0.11 werd 10.0.2.15.
 
-**Verwacht:** beide slagen.
-
-### 5.3 Geen NAT bij IPv6
-
-```
-hA1_emp ping6 -c2 2001:db8:a:ff::1
-```
-
-Tegelijk op de Mininet-VM:
-```
-sudo tcpdump -ni ispA-eth0 icmp6
-```
-
-**Waar je op let:** het bronadres blijft `2001:db8:a:10::11` — er wordt niets
-vertaald. Vergelijk met 4.2, waar het IPv4-adres wél veranderde.
-
-**Bewijs:** deze tcpdump naast het `ifconfig.me`-resultaat uit 4.2. Samen laten
-ze het fundamentele verschil zien tussen de twee protocollen.
-
-### 5.4 Waarom de ISP gesimuleerd is
-
+## 5.4 Waarom gesimuleerd
 ```
 ping6 -c3 2001:4860:4860::8888
 ```
+Op de VM zelf. Verwacht: No route vanaf fe80::2 — VirtualBox heeft geen IPv6-uplink.
 
-**Verwacht:** `Destination unreachable: No route` vanaf `fe80::2`.
+Ook aangepast in andere blokken
 
+De interfacenaam is ispNode-eth0, niet ispA-eth0. En in blok 8 wordt het:
+
+ispNode ping6 -c2 2001:db8:10::11
+
+Draai 5.1 even, dan weten we of het IPv6-pad nu compleet werkt — dat was het laatste openstaande punt.
 **Bewijs:** deze output onderbouwt de keuze voor een gesimuleerde ISP.
 
 > **Waarom /64 per VLAN?** Dat is de IPv6-standaard, ongeacht het aantal hosts —
