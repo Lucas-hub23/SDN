@@ -1,21 +1,5 @@
 """
-Campus SDN Topologie - Gebouw A & B (stabiele versie, dual-stack)
-
-VLAN's campusbreed - een subnet per categorie over beide gebouwen heen:
-  employee    10.10.0.0/23   + 2001:db8:10::/64   (510 adressen)
-  guest       10.20.0.0/24   + 2001:db8:20::/64
-  management  10.30.0.0/26   + 2001:db8:30::/64
-  wan (transit) 10.99.0.0/24 + 2001:db8:99::/64
-Totaal 826 IPv4-adressen; eis was 500 gelijktijdige gebruikers.
-
-Twee uplinks, een per gebouw:
-  natNode  op sA_core p4 - IPv4 NAT naar echt internet (root-namespace)
-  ispNode  op sB_core p5 - IPv6 naar gesimuleerde ISP (eigen namespace)
-
-Stateful firewall staat op beide uplink-nodes (conntrack via iptables /
-ip6tables), niet in de switchpipeline: verkeer dat via een stack-poort
-binnenkomt slaat de ACL-tabel over, waardoor uitgaande verbindingen niet
-gecommit kunnen worden en het retourverkeer zou worden gedropt.
+Campus SDN Topologie voor gebouw A & B met 3/4 VLANS(stabiele versie, dual-stack)
 """
 from functools import partial
 from mininet.topo import Topo
@@ -28,18 +12,15 @@ from mininet.log import setLogLevel, info
 
 FAUCET_IP = "192.168.56.20"
 
-# --- Transit-VLAN ---
-NAT_V4 = '10.99.0.10'           # natNode, gebouw A
-ISP_V4 = '10.99.0.20'           # ispNode, gebouw B
+NAT_V4 = '10.99.0.10'
+ISP_V4 = '10.99.0.20'
 ISP_V6 = '2001:db8:99::20'
-TRANSIT_V4GW = '10.99.0.1'      # Faucet-VIP op het transit-VLAN
+TRANSIT_V4GW = '10.99.0.1'
 TRANSIT_V6GW = '2001:db8:99::1'
-INTERNET_V6 = '2001:db8:ff::1'  # gesimuleerd "internet" op de ISP-node
+INTERNET_V6 = '2001:db8:ff::1'
 
-# --- Verdiepingen: (tag, host-nummer) ---
 FLOORS = [('A1', 11), ('A2', 12), ('B1', 13), ('B2', 14), ('B3', 15)]
 
-# --- Per categorie: adresformaat en gateway, beide protocollen ---
 CATEGORIES = {
     'emp': {'v4': '10.10.0.%d/23', 'v4gw': '10.10.0.1',
             'v6': '2001:db8:10::%d/64', 'v6gw': '2001:db8:10::1'},
@@ -55,7 +36,6 @@ V6_SUBNETS = ('2001:db8:10::/64', '2001:db8:20::/64', '2001:db8:30::/64')
 
 class CampusTopo(Topo):
     def build(self):
-        # === Switches ===
         sA_core = self.addSwitch('sA_core', dpid='0000000000000001')
         sA1 = self.addSwitch('sA1', dpid='0000000000000002')
         sA2 = self.addSwitch('sA2', dpid='0000000000000003')
@@ -64,42 +44,30 @@ class CampusTopo(Topo):
         sB2 = self.addSwitch('sB2', dpid='0000000000000006')
         sB3 = self.addSwitch('sB3', dpid='0000000000000007')
 
-        # === Uplink gebouw A: NAT-node voor IPv4 ===
-        # inNamespace=False -> deelt de root-namespace van de VM en ziet
-        # daardoor de echte eth0. Alleen zo kom je op echt internet.
         nat = self.addNode('natNode', cls=NAT, ip='%s/24' % NAT_V4,
                            subnet='10.0.0.0/8', inNamespace=False)
 
-        # === Uplink gebouw B: ISP-node voor IPv6 ===
-        # Gewone host in een EIGEN namespace: eigen routetabel en eigen
-        # ip6tables, los van de VM. Simuleert de router van de provider.
         isp = self.addHost('ispNode', ip='%s/24' % ISP_V4)
 
-        # === Stack-links ===
-        # Poortnummers EXPLICIET: Mininet nummert anders op volgorde van
-        # aanmaken, en dan loopt de nummering uit de pas met faucet.yaml.
         self.addLink(sA1, sA_core, port1=1, port2=1, cls=TCLink, bw=1000)
         self.addLink(sA2, sA_core, port1=1, port2=2, cls=TCLink, bw=1000)
         self.addLink(sB1, sB_core, port1=1, port2=1, cls=TCLink, bw=1000)
         self.addLink(sB2, sB_core, port1=1, port2=2, cls=TCLink, bw=1000)
         self.addLink(sB3, sB_core, port1=1, port2=3, cls=TCLink, bw=1000)
 
-        # Darkfiber tussen de gebouwen: sA_core p3 <-> sB_core p4
         self.addLink(sA_core, sB_core, port1=3, port2=4,
                      cls=TCLink, bw=1000, delay='5ms')
 
-        # Uplinks
         self.addLink(nat, sA_core, port2=4)
         self.addLink(isp, sB_core, port2=5)
 
-        # === Hosts: per verdieping employee / guest / management ===
         switches = {'A1': sA1, 'A2': sA2, 'B1': sB1, 'B2': sB2, 'B3': sB3}
         for tag, n in FLOORS:
             sw = switches[tag]
             for i, cat in enumerate(('emp', 'gst', 'mgt')):
                 host = self.addHost('h%s_%s' % (tag, cat),
                                     ip=CATEGORIES[cat]['v4'] % n)
-                self.addLink(host, sw, port2=2 + i)   # emp=2, gst=3, mgt=4
+                self.addLink(host, sw, port2=2 + i)
 
 
 def configure_hosts(net):
@@ -128,16 +96,9 @@ def configure_nat(net):
     nat = net.get('natNode')
     nat.cmd('sysctl -w net.ipv4.ip_forward=1')
 
-    # Interface-onafhankelijke MASQUERADE. De -C check voorkomt dubbele
-    # regels bij herstart: de root-namespace wordt niet opgeruimd door
-    # net.stop().
     rule = '-t nat POSTROUTING -s 10.0.0.0/8 ! -d 10.0.0.0/8 -j MASQUERADE'
     nat.cmd('iptables -C %s 2>/dev/null || iptables -A %s' % (rule, rule))
 
-    # --- Stateful firewall IPv4 ---
-    # LET OP: dit past de FORWARD-chain van de HELE VM aan (root-namespace).
-    # Wil je de firewall uitschakelen voor een test, vervang dit blok dan
-    # door: nat.cmd('iptables -P FORWARD ACCEPT')
     nat.cmd('iptables -F FORWARD')
     nat.cmd('iptables -P FORWARD DROP')
     nat.cmd('iptables -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT')
@@ -146,7 +107,6 @@ def configure_nat(net):
         nat.cmd('iptables -A FORWARD -s %s -m conntrack --ctstate NEW -j ACCEPT'
                 % subnet)
 
-    # Retourroutes naar de interne VLAN's via de Faucet-VIP
     for subnet in V4_SUBNETS:
         nat.cmd('ip route replace %s via %s' % (subnet, TRANSIT_V4GW))
 
@@ -166,23 +126,18 @@ def configure_isp(net):
     isp.cmd('sysctl -w net.ipv4.ip_forward=1')
 
     isp.cmd('ip -6 addr add %s/64 dev ispNode-eth0' % ISP_V6)
-    # "Een host op internet". Op eth0 en niet op lo: vanaf loopback kiest
-    # Linux een verkeerd bronadres voor uitgaand verkeer.
     isp.cmd('ip -6 addr add %s/128 dev ispNode-eth0' % INTERNET_V6)
 
-    # --- Stateful firewall IPv6 ---
     isp.cmd('ip6tables -F FORWARD')
     isp.cmd('ip6tables -P FORWARD DROP')
     isp.cmd('ip6tables -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT')
     isp.cmd('ip6tables -A FORWARD -m conntrack --ctstate INVALID -j DROP')
-    # Neighbor Discovery moet altijd door, anders breekt IPv6 volledig
     for icmp6 in ('133', '134', '135', '136'):
         isp.cmd('ip6tables -A FORWARD -p icmpv6 --icmpv6-type %s -j ACCEPT' % icmp6)
     for subnet in V6_SUBNETS:
         isp.cmd('ip6tables -A FORWARD -s %s -m conntrack --ctstate NEW -j ACCEPT'
                 % subnet)
 
-    # Retourroutes naar de interne VLAN's via de Faucet-VIP
     for subnet in V6_SUBNETS:
         isp.cmd('ip -6 route replace %s via %s' % (subnet, TRANSIT_V6GW))
 

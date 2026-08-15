@@ -1,0 +1,175 @@
+meters:
+  guest-ratelimit:
+    meter_id: 1
+    entry:
+      flags: ["KBPS", "BURST", "STATS"]
+      bands:
+        - type: DROP
+          rate: 10000
+          burst_size: 1000
+
+acls:
+  guest-isolation:
+    - rule: {dl_type: 0x0806, actions: {allow: true}}
+    - rule: {dl_type: 0x86dd, nw_proto: 58, icmpv6_type: 133, actions: {allow: true}}
+    - rule: {dl_type: 0x86dd, nw_proto: 58, icmpv6_type: 134, actions: {allow: true}}
+    - rule: {dl_type: 0x86dd, nw_proto: 58, icmpv6_type: 135, actions: {allow: true}}
+    - rule: {dl_type: 0x86dd, nw_proto: 58, icmpv6_type: 136, actions: {allow: true}}
+
+    - rule: {dl_type: 0x0800, nw_dst: "10.20.0.1", actions: {allow: true}}
+    - rule: {dl_type: 0x86dd, ipv6_dst: "2001:db8:20::1", actions: {allow: true}}
+
+    - rule: {dl_type: 0x0800, nw_dst: "10.20.0.0/24", actions: {allow: false}}
+    - rule: {dl_type: 0x86dd, ipv6_dst: "2001:db8:20::/64", actions: {allow: false}}
+
+    - rule:
+        actions:
+          allow: true
+          meter: guest-ratelimit
+
+vlans:
+  employee:
+    vid: 10
+    description: "Employee netwerk - beide gebouwen"
+    faucet_vips: ["10.10.0.1/23", "2001:db8:10::1/64"]
+    faucet_mac: "0e:00:00:00:10:01"
+  guest:
+    vid: 20
+    description: "Gastennetwerk - onderling geisoleerd, 10 Mbit"
+    acls_in: [guest-isolation]
+    faucet_vips: ["10.20.0.1/24", "2001:db8:20::1/64"]
+    faucet_mac: "0e:00:00:00:20:01"
+  management:
+    vid: 30
+    description: "Management netwerk"
+    faucet_vips: ["10.30.0.1/26", "2001:db8:30::1/64"]
+    faucet_mac: "0e:00:00:00:30:01"
+  wan:
+    vid: 40
+    description: "Transit naar natNode (IPv4) en ispNode (IPv6)"
+    faucet_vips: ["10.99.0.1/24", "2001:db8:99::1/64"]
+    faucet_mac: "0e:00:00:00:40:01"
+    routes:
+      - route: {ip_dst: "0.0.0.0/0", ip_gw: "10.99.0.10"}
+      - route: {ip_dst: "::/0", ip_gw: "2001:db8:99::20"}
+      - route: {ip_dst: "2001:db8:ff::/64", ip_gw: "2001:db8:99::20"}
+
+routers:
+  router-employee-wan:
+    vlans: [employee, wan]
+  router-guest-wan:
+    vlans: [guest, wan]
+  router-management-wan:
+    vlans: [management, wan]
+
+dps:
+  sA_core:
+    dp_id: 0x1
+    hardware: "Open vSwitch"
+    lldp_beacon:
+      send_interval: 15
+      max_per_interval: 10
+    stack:
+      priority: 1
+    interfaces:
+      1: {description: "stack naar sA1",     stack: {dp: sA1, port: 1}}
+      2: {description: "stack naar sA2",     stack: {dp: sA2, port: 1}}
+      3: {description: "darkfiber naar sB_core", stack: {dp: sB_core, port: 4}}
+      4:
+        description: "natNode - IPv4 uplink gebouw A"
+        native_vlan: wan
+
+  sA1:
+    dp_id: 0x2
+    hardware: "Open vSwitch"
+    lldp_beacon:
+      send_interval: 15
+      max_per_interval: 10
+    interfaces:
+      1: {description: "stack naar sA_core", stack: {dp: sA_core, port: 1}}
+      2: {description: "hA1_emp", native_vlan: employee}
+      3: {description: "hA1_gst", native_vlan: guest}
+      4:
+        description: "hA1_mgt"
+        native_vlan: management
+        permanent_learn: true
+        max_hosts: 1
+
+  sA2:
+    dp_id: 0x3
+    hardware: "Open vSwitch"
+    lldp_beacon:
+      send_interval: 15
+      max_per_interval: 10
+    interfaces:
+      1: {description: "stack naar sA_core", stack: {dp: sA_core, port: 2}}
+      2: {description: "hA2_emp", native_vlan: employee}
+      3: {description: "hA2_gst", native_vlan: guest}
+      4:
+        description: "hA2_mgt"
+        native_vlan: management
+        permanent_learn: true
+        max_hosts: 1
+
+  sB_core:
+    dp_id: 0x4
+    hardware: "Open vSwitch"
+    lldp_beacon:
+      send_interval: 15
+      max_per_interval: 10
+    interfaces:
+      1: {description: "stack naar sB1",     stack: {dp: sB1, port: 1}}
+      2: {description: "stack naar sB2",     stack: {dp: sB2, port: 1}}
+      3: {description: "stack naar sB3",     stack: {dp: sB3, port: 1}}
+      4: {description: "darkfiber naar sA_core", stack: {dp: sA_core, port: 3}}
+      5:
+        description: "ispNode - IPv6 uplink gebouw B"
+        native_vlan: wan
+
+  sB1:
+    dp_id: 0x5
+    hardware: "Open vSwitch"
+    lldp_beacon:
+      send_interval: 15
+      max_per_interval: 10
+    interfaces:
+      1: {description: "stack naar sB_core", stack: {dp: sB_core, port: 1}}
+      2: {description: "hB1_emp", native_vlan: employee}
+      3: {description: "hB1_gst", native_vlan: guest}
+      4:
+        description: "hB1_mgt"
+        native_vlan: management
+        permanent_learn: true
+        max_hosts: 1
+
+  sB2:
+    dp_id: 0x6
+    hardware: "Open vSwitch"
+    lldp_beacon:
+      send_interval: 15
+      max_per_interval: 10
+    interfaces:
+      1: {description: "stack naar sB_core", stack: {dp: sB_core, port: 2}}
+      2: {description: "hB2_emp", native_vlan: employee}
+      3: {description: "hB2_gst", native_vlan: guest}
+      4:
+        description: "hB2_mgt"
+        native_vlan: management
+        permanent_learn: true
+        max_hosts: 1
+
+  sB3:
+    dp_id: 0x7
+    hardware: "Open vSwitch"
+    lldp_beacon:
+      send_interval: 15
+      max_per_interval: 10
+    interfaces:
+      1: {description: "stack naar sB_core", stack: {dp: sB_core, port: 3}}
+      2: {description: "hB3_emp", native_vlan: employee}
+      3: {description: "hB3_gst", native_vlan: guest}
+      4:
+        description: "hB3_mgt"
+        native_vlan: management
+        permanent_learn: true
+        max_hosts: 1

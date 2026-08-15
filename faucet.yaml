@@ -1,4 +1,5 @@
 meters:
+  #ratelimiting meter voor het gastennetwerk. Wordt toegpast door de ACL cfg.
   guest-ratelimit:
     meter_id: 1
     entry:
@@ -9,57 +10,92 @@ meters:
           burst_size: 1000   # 1000 kb burst
 
 acls:
-  # ---------------------------------------------------------------
-  # Gastnetwerk: onderling geisoleerd, rest via de meter.
+  # Gastnetwerk gebouw A.
   #
-  # De scheiding met employee/management komt van de routers: guest zit
+  # Scheiding met employee/management komt van de routers. guest_a zit
   # alleen met wan in een router, dus er BESTAAT geen pad naar de andere
-  # user-VLAN's. Deze ACL doet twee dingen die de routers niet kunnen:
-  # gast-naar-gast blokkeren BINNEN het eigen subnet (L2-verkeer, daar
-  # komt geen routing aan te pas) en rate limiting.
-  # ---------------------------------------------------------------
-  guest-isolation:
+  # user-VLAN's. Deze ACL blokkeert gast-naar-gast BINNEN hetzelfde subnet en doet rate limiting.
+  guest-a-isolation:
     # ARP moet door, anders vindt een gast zijn gateway niet
     - rule: {dl_type: 0x0806, actions: {allow: true}}
 
-    # ICMPv6 Neighbor Discovery: de IPv6-tegenhanger van ARP.
-    # ZONDER deze regels werkt IPv6 helemaal niet.
-    - rule: {dl_type: 0x86dd, nw_proto: 58, icmpv6_type: 133, actions: {allow: true}}  # RS
-    - rule: {dl_type: 0x86dd, nw_proto: 58, icmpv6_type: 134, actions: {allow: true}}  # RA
-    - rule: {dl_type: 0x86dd, nw_proto: 58, icmpv6_type: 135, actions: {allow: true}}  # NS
-    - rule: {dl_type: 0x86dd, nw_proto: 58, icmpv6_type: 136, actions: {allow: true}}  # NA
+    # ICMPv6 Neighbor Discovery zelfde
+    - rule: {dl_type: 0x86dd, nw_proto: 58, icmpv6_type: 133, actions: {allow: true}}
+    - rule: {dl_type: 0x86dd, nw_proto: 58, icmpv6_type: 134, actions: {allow: true}}
+    - rule: {dl_type: 0x86dd, nw_proto: 58, icmpv6_type: 135, actions: {allow: true}}
+    - rule: {dl_type: 0x86dd, nw_proto: 58, icmpv6_type: 136, actions: {allow: true}}
 
-    # Eigen gateway bereikbaar - MOET voor de deny-regels staan
+    # Eigen gateway bereikbaar
     - rule: {dl_type: 0x0800, nw_dst: "10.20.0.1", actions: {allow: true}}
-    - rule: {dl_type: 0x86dd, ipv6_dst: "2001:db8:20::1", actions: {allow: true}}
+    - rule: {dl_type: 0x86dd, ipv6_dst: "2001:db8:a:20::1", actions: {allow: true}}
 
-    # Gast-naar-gast geblokkeerd, in beide protocollen
+    # Gast-naar-gast binnen het eigen subnet dicht ipv4 en ipv6
     - rule: {dl_type: 0x0800, nw_dst: "10.20.0.0/24", actions: {allow: false}}
-    - rule: {dl_type: 0x86dd, ipv6_dst: "2001:db8:20::/64", actions: {allow: false}}
+    - rule: {dl_type: 0x86dd, ipv6_dst: "2001:db8:a:20::/64", actions: {allow: false}}
 
-    # Al het overige (internet) door de meter
+    # Al het overige (internet) door de meter ratelimiting
+    - rule:
+        actions:
+          allow: true
+          meter: guest-ratelimit
+
+  # Gastnetwerk gebouw B zelfde opzet
+  guest-b-isolation:
+    - rule: {dl_type: 0x0806, actions: {allow: true}}
+    - rule: {dl_type: 0x86dd, nw_proto: 58, icmpv6_type: 133, actions: {allow: true}}
+    - rule: {dl_type: 0x86dd, nw_proto: 58, icmpv6_type: 134, actions: {allow: true}}
+    - rule: {dl_type: 0x86dd, nw_proto: 58, icmpv6_type: 135, actions: {allow: true}}
+    - rule: {dl_type: 0x86dd, nw_proto: 58, icmpv6_type: 136, actions: {allow: true}}
+    - rule: {dl_type: 0x0800, nw_dst: "10.21.0.1", actions: {allow: true}}
+    - rule: {dl_type: 0x86dd, ipv6_dst: "2001:db8:b:20::1", actions: {allow: true}}
+    - rule: {dl_type: 0x0800, nw_dst: "10.21.0.0/24", actions: {allow: false}}
+    - rule: {dl_type: 0x86dd, ipv6_dst: "2001:db8:b:20::/64", actions: {allow: false}}
     - rule:
         actions:
           allow: true
           meter: guest-ratelimit
 
 vlans:
-  employee:
+  # Gebouw A - 2001:db8:a::/48
+  employee_a:
     vid: 10
-    description: "Employee netwerk - beide gebouwen"
-    faucet_vips: ["10.10.0.1/23", "2001:db8:10::1/64"]
-    faucet_mac: "0e:00:00:00:10:01"
-  guest:
+    description: "Employee gebouw A"
+    faucet_vips: ["10.10.0.1/24", "2001:db8:a:10::1/64"]
+    faucet_mac: "0e:00:00:00:11:01"
+  guest_a:
     vid: 20
-    description: "Gastennetwerk - onderling geisoleerd, 10 Mbit"
-    acls_in: [guest-isolation]
-    faucet_vips: ["10.20.0.1/24", "2001:db8:20::1/64"]
-    faucet_mac: "0e:00:00:00:20:01"
-  management:
+    description: "Gasten gebouw A - onderling geisoleerd, 10 Mbit"
+    acls_in: [guest-a-isolation]
+    faucet_vips: ["10.20.0.1/24", "2001:db8:a:20::1/64"]
+    faucet_mac: "0e:00:00:00:21:01"
+  management_a:
     vid: 30
-    description: "Management netwerk"
-    faucet_vips: ["10.30.0.1/26", "2001:db8:30::1/64"]
-    faucet_mac: "0e:00:00:00:30:01"
+    description: "Management gebouw A"
+    faucet_vips: ["10.30.0.1/26", "2001:db8:a:30::1/64"]
+    faucet_mac: "0e:00:00:00:31:01"
+
+  # Gebouw B - 2001:db8:b::/48 
+  employee_b:
+    vid: 11
+    description: "Employee gebouw B"
+    faucet_vips: ["10.11.0.1/24", "2001:db8:b:10::1/64"]
+    faucet_mac: "0e:00:00:00:12:01"
+  guest_b:
+    vid: 21
+    description: "Gasten gebouw B - onderling geisoleerd, 10 Mbit"
+    acls_in: [guest-b-isolation]
+    faucet_vips: ["10.21.0.1/24", "2001:db8:b:20::1/64"]
+    faucet_mac: "0e:00:00:00:22:01"
+  management_b:
+    vid: 31
+    description: "Management gebouw B"
+    faucet_vips: ["10.31.0.1/26", "2001:db8:b:30::1/64"]
+    faucet_mac: "0e:00:00:00:32:01"
+
+  # Gedeeld transit-VLAN naar beide uplinks
+  # Geen gebruikers alleen natNode (gebouw A, IPv4) en ispNode
+  # (gebouw B, IPv6). Gedeeld omdat beide gebouwen beide uplinks
+  # moeten kunnen bereiken. IPv4 loopt via A, IPv6 via B.
   wan:
     vid: 40
     description: "Transit naar natNode (IPv4) en ispNode (IPv6)"
@@ -70,27 +106,31 @@ vlans:
       - route: {ip_dst: "0.0.0.0/0", ip_gw: "10.99.0.10"}
       # IPv6 default -> ispNode in gebouw B. Geen NAT: IPv6 is end-to-end.
       - route: {ip_dst: "::/0", ip_gw: "2001:db8:99::20"}
-      # Expliciete route naar het gesimuleerde "internet"
+      # Route naar het gesimuleerde "internet"
       - route: {ip_dst: "2001:db8:ff::/64", ip_gw: "2001:db8:99::20"}
 
-routers:
-  # Elke router is een expliciete toestemming: deze twee VLAN's mogen
-  # elkaars verkeer routeren. Wat hier niet staat, heeft geen pad - de
-  # scheiding zit dus in de routeringslaag, niet in filtering.
-  #
-  # Elk user-VLAN mag alleen met wan routeren, niet met elkaar.
-  router-employee-wan:
-    vlans: [employee, wan]
-  router-guest-wan:
-    vlans: [guest, wan]
-  router-management-wan:
-    vlans: [management, wan]
+routers: 
+  # Wat hier niet gerouteerd wordt, heeft geen pad. De scheiding
+  # zit dus in de routeringslaag, niet in filtering/ACL.
+
+  # Elke VLAN/categorie naar de uplinks
+  router-a-employee:   {vlans: [employee_a, wan]}
+  router-a-guest:      {vlans: [guest_a, wan]}
+  router-a-management: {vlans: [management_a, wan]}
+  router-b-employee:   {vlans: [employee_b, wan]}
+  router-b-guest:      {vlans: [guest_b, wan]}
+  router-b-management: {vlans: [management_b, wan]}
+
+  # Tussen de gebouwen alleen dezelfde categorie dit gaat via de darkfiber
+  router-employee-cross:   {vlans: [employee_a, employee_b]}
+  router-management-cross: {vlans: [management_a, management_b]}
 
 dps:
-  # === Gebouw A ===
-  # lldp_beacon met ruimere intervallen: bij een volledige herconfiguratie
-  # over zeven datapaths kunnen beacons uitblijven, waardoor stack-poorten
-  # ten onrechte als dood worden gemarkeerd en de stack blijft flappen.
+  # Gebouw A
+  # lldp_beacon met ruimere intervallen. Bij zeven VLAN's over zeven
+  # datapaths duurt een volledige herconfiguratie langer dan de
+  # standaard LLDP-timeout, waardoor stackpoorten als
+  # dood worden gemarkeerd en de stack blijft flappen.
   sA_core:
     dp_id: 0x1
     hardware: "Open vSwitch"
@@ -115,12 +155,12 @@ dps:
       max_per_interval: 10
     interfaces:
       1: {description: "stack naar sA_core", stack: {dp: sA_core, port: 1}}
-      2: {description: "hA1_emp", native_vlan: employee}
-      3: {description: "hA1_gst", native_vlan: guest}
+      2: {description: "hA1_emp", native_vlan: employee_a}
+      3: {description: "hA1_gst", native_vlan: guest_a}
       4:
         description: "hA1_mgt"
-        native_vlan: management
-        permanent_learn: true    # NFV: port security - bindt poort aan eerste MAC
+        native_vlan: management_a
+        permanent_learn: true    # Port security bindt poort aan eerste MAC
         max_hosts: 1
 
   sA2:
@@ -131,15 +171,15 @@ dps:
       max_per_interval: 10
     interfaces:
       1: {description: "stack naar sA_core", stack: {dp: sA_core, port: 2}}
-      2: {description: "hA2_emp", native_vlan: employee}
-      3: {description: "hA2_gst", native_vlan: guest}
+      2: {description: "hA2_emp", native_vlan: employee_a}
+      3: {description: "hA2_gst", native_vlan: guest_a}
       4:
         description: "hA2_mgt"
-        native_vlan: management
+        native_vlan: management_a
         permanent_learn: true
         max_hosts: 1
 
-  # === Gebouw B ===
+  # Gebouw B
   sB_core:
     dp_id: 0x4
     hardware: "Open vSwitch"
@@ -163,11 +203,11 @@ dps:
       max_per_interval: 10
     interfaces:
       1: {description: "stack naar sB_core", stack: {dp: sB_core, port: 1}}
-      2: {description: "hB1_emp", native_vlan: employee}
-      3: {description: "hB1_gst", native_vlan: guest}
+      2: {description: "hB1_emp", native_vlan: employee_b}
+      3: {description: "hB1_gst", native_vlan: guest_b}
       4:
         description: "hB1_mgt"
-        native_vlan: management
+        native_vlan: management_b
         permanent_learn: true
         max_hosts: 1
 
@@ -179,11 +219,11 @@ dps:
       max_per_interval: 10
     interfaces:
       1: {description: "stack naar sB_core", stack: {dp: sB_core, port: 2}}
-      2: {description: "hB2_emp", native_vlan: employee}
-      3: {description: "hB2_gst", native_vlan: guest}
+      2: {description: "hB2_emp", native_vlan: employee_b}
+      3: {description: "hB2_gst", native_vlan: guest_b}
       4:
         description: "hB2_mgt"
-        native_vlan: management
+        native_vlan: management_b
         permanent_learn: true
         max_hosts: 1
 
@@ -195,10 +235,10 @@ dps:
       max_per_interval: 10
     interfaces:
       1: {description: "stack naar sB_core", stack: {dp: sB_core, port: 3}}
-      2: {description: "hB3_emp", native_vlan: employee}
-      3: {description: "hB3_gst", native_vlan: guest}
+      2: {description: "hB3_emp", native_vlan: employee_b}
+      3: {description: "hB3_gst", native_vlan: guest_b}
       4:
         description: "hB3_mgt"
-        native_vlan: management
+        native_vlan: management_b
         permanent_learn: true
         max_hosts: 1
